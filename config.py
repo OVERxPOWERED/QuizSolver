@@ -2,7 +2,7 @@
 
 import os
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Optional
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 
@@ -83,7 +83,21 @@ class Config(BaseModel):
         description="Automatically submit quiz or ask for manual confirmation",
     )
 
-    # Target Courses
+    # Coding & Assessment Settings
+    CODING_LANGUAGE: str = Field(
+        default=os.getenv("CODING_LANGUAGE", "python").strip().lower(),
+        description="Target programming language for coding challenges (python, cpp, java, c, javascript, sql)",
+    )
+    ASSESSMENT_MODE: Literal["auto", "quiz", "coding", "mixed"] = Field(
+        default=os.getenv("ASSESSMENT_MODE", "auto").strip().lower(),
+        description="Mode: 'auto' (detects quiz vs code), 'quiz', 'coding', or 'mixed'",
+    )
+    TARGET_URL: Optional[str] = Field(
+        default=os.getenv("TARGET_URL", "").strip() or None,
+        description="Direct URL to any quiz, coding problem, or form",
+    )
+
+    # Target Courses (LMS mode)
     TARGET_COURSES: list[str] = [
         "Outcome Based Education",
         "Indian Constitution",

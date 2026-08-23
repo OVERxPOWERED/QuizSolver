@@ -1,4 +1,4 @@
-"""Main entry point for Acropolis LMS Quiz Automation."""
+"""Universal AI Assessment & Coding Solver CLI Entry Point."""
 
 import argparse
 import asyncio
@@ -7,7 +7,9 @@ from rich.panel import Panel
 from rich.table import Table
 from config import config
 from core.browser import BrowserManager
+from core.coding_runner import CodingRunner
 from core.database import QuestionBankDB
+from core.detector import UniversalDetector
 from core.lms_client import LMSClient
 from core.quiz_runner import QuizRunner
 from utils.logger import console, log
@@ -26,17 +28,18 @@ def print_banner(db: QuestionBankDB):
     info_table.add_column("Key", style="bold cyan")
     info_table.add_column("Value", style="bold white")
 
-    info_table.add_row("🌐 LMS URL", f"{config.base_url} ({config.LMS_NETWORK.upper()})")
-    info_table.add_row("👤 Student ID", config.LMS_USERNAME or "[dim yellow]Not configured (Set in .env)[/dim yellow]")
+    info_table.add_row("🌐 LMS / Target", config.TARGET_URL or f"{config.base_url} ({config.LMS_NETWORK.upper()})")
+    info_table.add_row("👤 Student ID", config.LMS_USERNAME or "[dim yellow]Not configured[/dim yellow]")
     info_table.add_row("🧠 AI Engine", ai_status)
+    info_table.add_row("💻 Coding Lang", f"[bold magenta]{config.CODING_LANGUAGE.upper()}[/bold magenta]")
     info_table.add_row("🖥️  Mode", "Headless (Silent Background)" if config.HEADLESS else "Headful (Live Interactive Window)")
-    info_table.add_row("📦 Local QA Bank", f"{db_count} learned questions in SQLite")
+    info_table.add_row("📦 QA Bank", f"{db_count} learned questions in SQLite")
 
     console.print(
         Panel(
             info_table,
-            title="[bold yellow]⚡ Acropolis LMS AI Quiz Automation ⚡[/bold yellow]",
-            subtitle="[italic dim]Automated Quiz Solver & Knowledge Learner[/italic dim]",
+            title="[bold yellow]⚡ Universal AI Quiz & Coding Assessment Solver ⚡[/bold yellow]",
+            subtitle="[italic dim]Autonomous Solver for Quizzes, Forms & Coding Challenges[/italic dim]",
             border_style="bright_blue",
         )
     )
@@ -47,26 +50,12 @@ async def run_automation(args: argparse.Namespace):
     db = QuestionBankDB()
     print_banner(db)
 
-    # Validate credentials
-    if not config.LMS_USERNAME:
-        console.print(
-            Panel(
-                "[bold red]LMS_USERNAME is not set in your .env file![/bold red]\n"
-                "Please edit the [bold cyan].env[/bold cyan] file with your student enrollment number and password.",
-                title="Configuration Error",
-                border_style="red",
-            )
-        )
-        sys.exit(1)
-
     # Validate AI key
     if config.AI_PROVIDER == "gemini" and not config.GEMINI_API_KEY:
         if not config.NVIDIA_API_KEY:
             console.print(
                 Panel(
-                    "[bold red]Neither GEMINI_API_KEY nor NVIDIA_API_KEY is configured in .env![/bold red]\n"
-                    "Get a free Gemini key at: [link=https://aistudio.google.com/app/apikey]https://aistudio.google.com/app/apikey[/link]\n"
-                    "Or NVIDIA key at: [link=https://build.nvidia.com]https://build.nvidia.com[/link]",
+                    "[bold red]Neither GEMINI_API_KEY nor NVIDIA_API_KEY is configured in .env![/bold red]",
                     title="API Key Missing",
                     border_style="red",
                 )
@@ -79,27 +68,74 @@ async def run_automation(args: argparse.Namespace):
     page = await browser_mgr.start()
 
     try:
+        # ==========================================
+        # 1. Direct Target URL Mode (Coding or Form)
+        # ==========================================
+        target_url = args.url or config.TARGET_URL
+        if target_url:
+            log.info(f"Opening Target Assessment URL: [link={target_url}]{target_url}[/link]")
+            await page.goto(target_url, wait_until="domcontentloaded")
+            await asyncio.sleep(2)
+
+            page_ctx = await UniversalDetector.analyze_page(page)
+
+            # Determine execution path
+            mode = args.mode if args.mode != "auto" else page_ctx.mode
+
+            if mode in ("coding", "mixed") or page_ctx.editor_type != "unknown":
+                coding_runner = CodingRunner(page, db=db)
+                await coding_runner.solve_challenge(language=args.lang)
+            else:
+                quiz_runner = QuizRunner(page, db=db)
+                # Parse and answer generic page questions
+                from core.question_parser import UniversalQuestionParser
+                questions = await UniversalQuestionParser.parse_questions_from_page(page)
+                log.info(f"Found {len(questions)} question(s) on target page.")
+                for q in questions:
+                    parsed_q = type("ParsedQ", (), {
+                        "slot": q.slot,
+                        "text": q.text,
+                        "options": q.options,
+                        "element_locator": q.element_locator
+                    })()
+                    await quiz_runner.answer_question(parsed_q, course_name="Direct Assessment")
+
+            console.print("\n[bold green]✓ Assessment execution completed successfully![/bold green]\n")
+            return
+
+        # ==========================================
+        # 2. LMS Course Assessment Mode
+        # ==========================================
+        if not config.LMS_USERNAME:
+            console.print(
+                Panel(
+                    "[bold red]LMS_USERNAME is not set in your .env file![/bold red]\n"
+                    "Please edit the [bold cyan].env[/bold cyan] file with your student enrollment number and password.",
+                    title="Configuration Error",
+                    border_style="red",
+                )
+            )
+            sys.exit(1)
+
         lms_client = LMSClient(page)
         quiz_runner = QuizRunner(page, db=db)
 
-        # 1. Login
+        # Login
         logged_in = await lms_client.login()
         if not logged_in:
             log.error("Aborting automation due to login failure.")
             return
 
-        # 2. Discover target courses
+        # Discover courses
         courses = await lms_client.get_enrolled_courses()
         if not courses:
-            log.error("No target courses found. Please ensure you are enrolled.")
+            log.error("No target courses found.")
             return
 
-        # Select course(s) to process
         selected_courses = []
         if args.all:
             selected_courses = courses
         elif args.course:
-            # Match by index or name
             if args.course.isdigit():
                 idx = int(args.course) - 1
                 if 0 <= idx < len(courses):
@@ -110,7 +146,6 @@ async def run_automation(args: argparse.Namespace):
                 log.error(f"Course matching '{args.course}' not found.")
                 return
         else:
-            # Interactive selection
             console.print("\n[bold cyan]Available Target Courses:[/bold cyan]")
             for idx, c in enumerate(courses, 1):
                 console.print(f"  [bold yellow][{idx}][/bold yellow] {c.title}")
@@ -125,7 +160,7 @@ async def run_automation(args: argparse.Namespace):
                 log.error("Invalid choice.")
                 return
 
-        # 3. Process each selected course
+        # Process selected courses
         summary_results = []
         for course in selected_courses:
             console.rule(f"[bold magenta]Course: {course.title}[/bold magenta]")
@@ -143,7 +178,7 @@ async def run_automation(args: argparse.Namespace):
                 status_str = "[bold green]Completed[/bold green]" if success else "[bold yellow]Skipped/Locked[/bold yellow]"
                 summary_results.append((course.title, quiz.title, status_str))
 
-        # 4. Display Final Summary Table
+        # Summary Table
         console.print("\n")
         table = Table(title="🎯 [bold green]Automation Execution Summary[/bold green]", border_style="green")
         table.add_column("Course", style="cyan")
@@ -161,10 +196,14 @@ async def run_automation(args: argparse.Namespace):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Acropolis LMS AI-Powered Quiz Automator")
+    parser = argparse.ArgumentParser(description="Universal AI Quiz & Coding Assessment Automator")
+    parser.add_argument("--url", type=str, help="Direct URL to any quiz, form, or coding problem")
+    parser.add_argument("--mode", choices=["auto", "quiz", "coding"], default="auto", help="Assessment mode")
+    parser.add_argument("--lang", type=str, default="python", help="Target language for coding (python, cpp, java, c, javascript, sql)")
     parser.add_argument("--all", action="store_true", help="Attempt all assigned target courses sequentially")
     parser.add_argument("--course", type=str, help="Specific course name or index to attempt")
     parser.add_argument("--headless", action="store_true", default=None, help="Run browser in background")
+    parser.add_argument("--headful", action="store_false", dest="headless", help="Run browser in visible window")
     parser.add_argument("--reattempt", action="store_true", help="Force re-attempting already completed/passed quizzes")
     parser.add_argument("--fast", action="store_true", help="Fast mode: eliminates artificial delays (super fast solving)")
     parser.add_argument("--network", choices=["internet", "campus"], help="Override network mode")
@@ -177,6 +216,8 @@ def main():
         config.HUMAN_DELAY_MIN = 0.1
         config.HUMAN_DELAY_MAX = 0.3
         config.SLOW_MO_MS = 0
+    if args.lang:
+        config.CODING_LANGUAGE = args.lang
 
     try:
         asyncio.run(run_automation(args))

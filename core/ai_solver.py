@@ -1,8 +1,10 @@
-"""AI Question Solver Engine supporting Google Gemini and NVIDIA NIM with automatic model fallback."""
+"""Universal AI Reasoning & Code Synthesis Engine supporting Google Gemini and NVIDIA NIM."""
 
+import base64
 import json
 import re
 import time
+from pathlib import Path
 from typing import Any, Optional
 from pydantic import BaseModel, Field
 from config import config
@@ -11,19 +13,24 @@ from utils.logger import log
 
 
 class AISolution(BaseModel):
-    selected_option_index: int = Field(description="0-based index of the chosen option")
-    selected_option_text: str = Field(description="Exact text of the chosen option")
+    selected_option_index: int = Field(default=0, description="0-based index of the chosen option")
+    selected_option_text: str = Field(default="", description="Exact text of the chosen option")
     confidence: float = Field(default=1.0, description="Confidence score between 0.0 and 1.0")
     explanation: str = Field(default="", description="Brief explanation justifying the choice")
 
 
-SYSTEM_PROMPT = """You are an authoritative academic expert in Indian Higher Education, specialized in:
-1. Indian Constitution: Articles, Parts, Schedules, Preamble, Fundamental Rights & Duties, Directive Principles, Parliamentary & Judicial procedures, and Amendments.
-2. Indian Knowledge Systems (IKS): Vedic literature, Upanishads, Darshanas, ancient Indian Science, Mathematics (Sulba Sutras, Aryabhata, Brahmagupta), Ayurveda, Architecture (Vastu/Shilpa), and Metallurgy.
-3. Outcome Based Education (OBE): Bloom's Taxonomy cognitive levels, Program Outcomes (POs), Program Specific Outcomes (PSOs), Course Outcomes (COs), Attainment computation, NAAC, and NBA accreditation criteria.
+class AICodeSolution(BaseModel):
+    language: str = Field(description="Target programming language (python, cpp, java, c, javascript)")
+    code: str = Field(description="Pure, complete, and optimal source code")
+    complexity_time: str = Field(default="O(N)", description="Time complexity analysis")
+    complexity_space: str = Field(default="O(1)", description="Space complexity analysis")
+    explanation: str = Field(default="", description="Brief summary of algorithmic approach")
+
+
+GENERIC_QUIZ_SYSTEM_PROMPT = """You are a world-class academic expert and competitive test solver across all STEM fields, Computer Science, Law, and Humanities.
 
 TASK:
-Analyze the given multiple-choice / true-false academic question, examine all candidate options, and identify the single most factually accurate and syllabus-aligned answer.
+Analyze the given multiple-choice / true-false / short-answer academic or coding question, examine all candidate options, and identify the single most factually accurate and optimal answer.
 
 OUTPUT FORMAT:
 Respond ONLY with a valid JSON object in the following format (no extra text, no markdown backticks outside JSON):
@@ -35,9 +42,46 @@ Respond ONLY with a valid JSON object in the following format (no extra text, no
 }
 """
 
+CODING_SYSTEM_PROMPT = """You are a competitive programming Grandmaster and expert software engineer.
+You excel at writing optimal, bug-free, and production-ready code in Python, C++, Java, C, JavaScript, and SQL.
+
+RULES:
+1. Handle ALL constraints, corner cases (empty inputs, large numbers, max limits, negative values).
+2. Optimize for both Time Complexity and Space Complexity.
+3. If starter boilerplate / function signature is provided, adhere strictly to the exact function signature and imports.
+4. If standard I/O (stdin / stdout) is expected, implement fast I/O reading from `sys.stdin` or `cin`/`scanf`.
+5. Return ONLY clean, executable code without markdown commentary inside the code block.
+
+OUTPUT FORMAT:
+Respond ONLY with a valid JSON object:
+{
+  "language": "<target language>",
+  "code": "<complete raw source code string with newlines>",
+  "complexity_time": "<e.g. O(N log N)>",
+  "complexity_space": "<e.g. O(1)>",
+  "explanation": "<one sentence explanation of algorithmic approach>"
+}
+"""
+
+DEBUG_CODING_PROMPT = """You are an expert software debugger.
+The provided code failed on test cases or encountered a compilation/runtime error.
+Analyze the problem, current code, error output, and failed test cases (Expected vs Actual).
+Provide the corrected, bug-free solution that passes all test cases.
+
+OUTPUT FORMAT:
+Respond ONLY with a valid JSON object:
+{
+  "language": "<target language>",
+  "code": "<fixed complete raw source code string>",
+  "complexity_time": "<e.g. O(N)>",
+  "complexity_space": "<e.g. O(1)>",
+  "explanation": "<one sentence explaining the bug fix>"
+}
+"""
+
 
 class AISolver:
-    """Solves quiz questions using Gemini or NVIDIA NIM with resilient fallbacks."""
+    """Universal AI Problem & Code Solver with automatic multi-model fallbacks."""
 
     def __init__(self):
         self.provider = config.AI_PROVIDER.lower()
@@ -60,30 +104,44 @@ class AISolver:
             self._nvidia_client = OpenAI(
                 base_url=config.NVIDIA_BASE_URL,
                 api_key=config.NVIDIA_API_KEY,
-                timeout=12.0,  # Strict 12s timeout to prevent hanging
+                timeout=15.0,
             )
         return self._nvidia_client
 
-    def _build_user_prompt(self, question: str, options: list[str], course_context: str = "") -> str:
+    def _clean_json_str(self, raw_text: str) -> str:
+        """Strip markdown fences from JSON output."""
+        raw_text = raw_text.strip()
+        cleaned = re.sub(r"^```json\s*", "", raw_text, flags=re.IGNORECASE)
+        cleaned = re.sub(r"^```\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```$", "", cleaned).strip()
+        return cleaned
+
+    def _clean_code_output(self, code_str: str) -> str:
+        """Extract pure code if LLM enclosed it in markdown."""
+        code_str = code_str.strip()
+        match = re.search(r"```(?:\w+)?\n([\s\S]*?)```", code_str)
+        if match:
+            return match.group(1).strip()
+        return code_str
+
+    # ==========================================
+    # 1. Academic & General Quiz Solver
+    # ==========================================
+
+    def _build_quiz_prompt(self, question: str, options: list[str], context: str = "") -> str:
         prompt = ""
-        if course_context:
-            prompt += f"Course Context: {course_context}\n\n"
+        if context:
+            prompt += f"Context: {context}\n\n"
         prompt += f"Question:\n{question}\n\nCandidate Options:\n"
         for idx, opt in enumerate(options):
             prompt += f"[{idx}] {opt}\n"
-        prompt += "\nSelect the single correct option index and text based on official curriculum standards."
+        prompt += "\nSelect the single correct option index and text based on verified academic standards."
         return prompt
 
-    def _parse_response_json(self, raw_text: str, options: list[str]) -> AISolution:
-        """Robustly parse JSON response from LLM."""
-        raw_text = raw_text.strip()
-        cleaned_json = re.sub(r"^```json\s*", "", raw_text, flags=re.IGNORECASE)
-        cleaned_json = re.sub(r"^```\s*", "", cleaned_json)
-        cleaned_json = re.sub(r"\s*```$", "", cleaned_json).strip()
-
-        # Direct JSON parsing
+    def _parse_quiz_json(self, raw_text: str, options: list[str]) -> AISolution:
+        cleaned = self._clean_json_str(raw_text)
         try:
-            data = json.loads(cleaned_json)
+            data = json.loads(cleaned)
             idx = int(data.get("selected_option_index", 0))
             text = str(data.get("selected_option_text", ""))
 
@@ -106,7 +164,7 @@ class AISolver:
         except Exception:
             pass
 
-        # Fallback regex extraction
+        # Fallback regex
         match_idx = re.search(r'"selected_option_index":\s*(\d+)', raw_text)
         if match_idx:
             idx = int(match_idx.group(1))
@@ -118,7 +176,6 @@ class AISolver:
                     explanation="Extracted via fallback regex",
                 )
 
-        # Fallback fuzzy matching
         fuzzy_idx = fuzzy_match_option(raw_text, options)
         if fuzzy_idx is not None:
             return AISolution(
@@ -135,105 +192,215 @@ class AISolver:
             explanation="Default fallback selection",
         )
 
-    def _solve_gemini(self, question: str, options: list[str], course_context: str) -> AISolution:
-        client = self._get_gemini_client()
-        user_content = self._build_user_prompt(question, options, course_context)
-
-        # Try configured model, then fallback models if capacity / unavailable
-        candidate_models = [config.GEMINI_MODEL, "gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-3.6-flash"]
-        # Remove duplicates while preserving order
-        candidate_models = list(dict.fromkeys(candidate_models))
-
-        last_err = None
-        for model_name in candidate_models:
-            try:
-                t0 = time.time()
-                response = client.models.generate_content(
-                    model=model_name,
-                    contents=user_content,
-                    config={
-                        "system_instruction": SYSTEM_PROMPT,
-                        "temperature": 0.1,
-                        "response_mime_type": "application/json",
-                    },
-                )
-                dt = time.time() - t0
-                log.debug(f"Gemini ({model_name}) answered in {dt:.2f}s")
-                return self._parse_response_json(response.text, options)
-            except Exception as e:
-                last_err = e
-                err_str = str(e)
-                if "high demand" in err_str or "UNAVAILABLE" in err_str or "404" in err_str:
-                    log.warning(f"Model '{model_name}' busy or unavailable. Trying next model...")
-                    continue
-                else:
-                    log.warning(f"Gemini error with '{model_name}': {e}. Trying next fallback...")
-
-        raise RuntimeError(f"All Gemini models failed: {last_err}")
-
-    def _solve_nvidia(self, question: str, options: list[str], course_context: str) -> AISolution:
-        client = self._get_nvidia_client()
-        user_content = self._build_user_prompt(question, options, course_context)
-
-        t0 = time.time()
-        response = client.chat.completions.create(
-            model=config.NVIDIA_MODEL,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_content},
-            ],
-            temperature=0.1,
-            max_tokens=256,
-        )
-        dt = time.time() - t0
-        log.debug(f"NVIDIA NIM ({config.NVIDIA_MODEL}) answered in {dt:.2f}s")
-        raw_text = response.choices[0].message.content or ""
-        return self._parse_response_json(raw_text, options)
+    # Alias for backward compatibility
+    _parse_response_json = _parse_quiz_json
 
     def solve_question(
         self, question: str, options: list[str], course_context: str = ""
     ) -> AISolution:
-        """
-        Solve question using configured provider with automatic multi-provider fallback.
-        """
+        """Universal MCQ solver with multi-model auto fallback."""
         if not options:
             raise ValueError("Cannot solve question with empty options list")
 
-        primary_error = None
-        # 1. Try primary configured provider
-        if self.provider == "gemini":
-            try:
-                return self._solve_gemini(question, options, course_context)
-            except Exception as e:
-                primary_error = e
-                log.error(f"Gemini API error: {e}")
-                if config.NVIDIA_API_KEY:
-                    log.info("Attempting automatic fallback to NVIDIA NIM...")
-                    try:
-                        return self._solve_nvidia(question, options, course_context)
-                    except Exception as nv_e:
-                        log.error(f"NVIDIA fallback error: {nv_e}")
-        elif self.provider == "nvidia":
-            try:
-                return self._solve_nvidia(question, options, course_context)
-            except Exception as e:
-                primary_error = e
-                log.error(f"NVIDIA NIM error: {e}")
-                if config.GEMINI_API_KEY:
-                    log.info("Attempting automatic fallback to Google Gemini...")
-                    try:
-                        return self._solve_gemini(question, options, course_context)
-                    except Exception as gem_e:
-                        log.error(f"Gemini fallback error: {gem_e}")
+        user_content = self._build_quiz_prompt(question, options, course_context)
 
-        # Final resilient fallback: select first option if all remote calls fail
-        log.warning("All AI providers failed. Falling back to default option selection.")
-        return AISolution(
-            selected_option_index=0,
-            selected_option_text=options[0],
-            confidence=0.5,
-            explanation="Safe fallback selection",
+        # 1. Try Gemini
+        if self.provider == "gemini" or config.GEMINI_API_KEY:
+            try:
+                client = self._get_gemini_client()
+                for model in [config.GEMINI_MODEL, "gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-3.6-flash"]:
+                    try:
+                        res = client.models.generate_content(
+                            model=model,
+                            contents=user_content,
+                            config={
+                                "system_instruction": GENERIC_QUIZ_SYSTEM_PROMPT,
+                                "temperature": 0.1,
+                                "response_mime_type": "application/json",
+                            },
+                        )
+                        return self._parse_quiz_json(res.text, options)
+                    except Exception as e:
+                        if "high demand" in str(e) or "UNAVAILABLE" in str(e) or "404" in str(e):
+                            continue
+            except Exception as e:
+                log.warning(f"Gemini quiz solver error: {e}")
+
+        # 2. Try NVIDIA NIM
+        if config.NVIDIA_API_KEY:
+            try:
+                client = self._get_nvidia_client()
+                res = client.chat.completions.create(
+                    model=config.NVIDIA_MODEL,
+                    messages=[
+                        {"role": "system", "content": GENERIC_QUIZ_SYSTEM_PROMPT},
+                        {"role": "user", "content": user_content},
+                    ],
+                    temperature=0.1,
+                    max_tokens=256,
+                )
+                raw_text = res.choices[0].message.content or ""
+                return self._parse_quiz_json(raw_text, options)
+            except Exception as e:
+                log.warning(f"NVIDIA quiz solver error: {e}")
+
+        return AISolution(selected_option_index=0, selected_option_text=options[0], confidence=0.5)
+
+    # ==========================================
+    # 2. Coding & Algorithm Solver
+    # ==========================================
+
+    def solve_coding_problem(
+        self,
+        title: str,
+        description: str,
+        input_format: str = "",
+        output_format: str = "",
+        constraints: str = "",
+        sample_cases: str = "",
+        starter_code: str = "",
+        language: str = "python",
+    ) -> AICodeSolution:
+        """Synthesize complete, optimal code for any algorithmic / programming challenge."""
+        prompt = f"# Problem: {title}\n\n## Description:\n{description}\n\n"
+        if input_format:
+            prompt += f"## Input Format:\n{input_format}\n\n"
+        if output_format:
+            prompt += f"## Output Format:\n{output_format}\n\n"
+        if constraints:
+            prompt += f"## Constraints:\n{constraints}\n\n"
+        if sample_cases:
+            prompt += f"## Sample Test Cases:\n{sample_cases}\n\n"
+        if starter_code:
+            prompt += f"## Existing Starter Template / Signature:\n```{language}\n{starter_code}\n```\n\n"
+        prompt += f"Target Language: {language}\nWrite the complete, bug-free, optimal solution."
+
+        log.info(f"Generating [bold cyan]{language.upper()}[/bold cyan] solution for '{title}'...")
+
+        # 1. Try Gemini
+        if config.GEMINI_API_KEY:
+            try:
+                client = self._get_gemini_client()
+                for model in ["gemini-3.5-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite"]:
+                    try:
+                        res = client.models.generate_content(
+                            model=model,
+                            contents=prompt,
+                            config={
+                                "system_instruction": CODING_SYSTEM_PROMPT,
+                                "temperature": 0.1,
+                                "response_mime_type": "application/json",
+                            },
+                        )
+                        data = json.loads(self._clean_json_str(res.text))
+                        return AICodeSolution(
+                            language=language,
+                            code=self._clean_code_output(data.get("code", "")),
+                            complexity_time=data.get("complexity_time", "O(N)"),
+                            complexity_space=data.get("complexity_space", "O(1)"),
+                            explanation=data.get("explanation", ""),
+                        )
+                    except Exception as e:
+                        if "high demand" in str(e) or "UNAVAILABLE" in str(e):
+                            continue
+            except Exception as e:
+                log.warning(f"Gemini coding solver error: {e}")
+
+        # 2. Try NVIDIA NIM
+        if config.NVIDIA_API_KEY:
+            try:
+                client = self._get_nvidia_client()
+                res = client.chat.completions.create(
+                    model=config.NVIDIA_MODEL,
+                    messages=[
+                        {"role": "system", "content": CODING_SYSTEM_PROMPT},
+                        {"role": "user", "content": prompt},
+                    ],
+                    temperature=0.1,
+                    max_tokens=2048,
+                )
+                raw = res.choices[0].message.content or ""
+                data = json.loads(self._clean_json_str(raw))
+                return AICodeSolution(
+                    language=language,
+                    code=self._clean_code_output(data.get("code", "")),
+                    complexity_time=data.get("complexity_time", "O(N)"),
+                    complexity_space=data.get("complexity_space", "O(1)"),
+                    explanation=data.get("explanation", ""),
+                )
+            except Exception as e:
+                log.error(f"NVIDIA coding solver error: {e}")
+
+        raise RuntimeError("Failed to generate code solution from all configured AI providers.")
+
+    def debug_code_solution(
+        self,
+        problem_description: str,
+        current_code: str,
+        error_logs: str,
+        failed_test_case: str = "",
+        language: str = "python",
+    ) -> AICodeSolution:
+        """Self-debug failing code by analyzing compiler error / failed test outputs."""
+        prompt = (
+            f"# Problem Description:\n{problem_description}\n\n"
+            f"# Current Failing Code ({language}):\n```{language}\n{current_code}\n```\n\n"
+            f"# Execution Error / Compiler Feedback:\n{error_logs}\n\n"
         )
+        if failed_test_case:
+            prompt += f"# Failed Test Case (Expected vs Actual):\n{failed_test_case}\n\n"
+        prompt += f"Fix the bug and provide the corrected complete {language} solution."
+
+        log.info(f"Self-debugging [bold yellow]{language.upper()}[/bold yellow] solution...")
+
+        if config.GEMINI_API_KEY:
+            try:
+                client = self._get_gemini_client()
+                res = client.models.generate_content(
+                    model="gemini-3.5-flash",
+                    contents=prompt,
+                    config={
+                        "system_instruction": DEBUG_CODING_PROMPT,
+                        "temperature": 0.1,
+                        "response_mime_type": "application/json",
+                    },
+                )
+                data = json.loads(self._clean_json_str(res.text))
+                return AICodeSolution(
+                    language=language,
+                    code=self._clean_code_output(data.get("code", "")),
+                    complexity_time=data.get("complexity_time", "O(N)"),
+                    complexity_space=data.get("complexity_space", "O(1)"),
+                    explanation=data.get("explanation", ""),
+                )
+            except Exception as e:
+                log.warning(f"Gemini debug solver error: {e}")
+
+        if config.NVIDIA_API_KEY:
+            try:
+                client = self._get_nvidia_client()
+                res = client.chat.completions.create(
+                    model=config.NVIDIA_MODEL,
+                    messages=[
+                        {"role": "system", "content": DEBUG_CODING_PROMPT},
+                        {"role": "user", "content": prompt},
+                    ],
+                    temperature=0.1,
+                    max_tokens=2048,
+                )
+                raw = res.choices[0].message.content or ""
+                data = json.loads(self._clean_json_str(raw))
+                return AICodeSolution(
+                    language=language,
+                    code=self._clean_code_output(data.get("code", "")),
+                    complexity_time=data.get("complexity_time", "O(N)"),
+                    complexity_space=data.get("complexity_space", "O(1)"),
+                    explanation=data.get("explanation", ""),
+                )
+            except Exception as e:
+                log.error(f"NVIDIA debug solver error: {e}")
+
+        return AICodeSolution(language=language, code=current_code, explanation="Could not debug automatically.")
 
 
 solver = AISolver()
