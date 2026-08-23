@@ -1,4 +1,4 @@
-# ⚡ Acropolis LMS AI Quiz Automator
+# ⚡ LMS AI Quiz Automator
 
 An intelligent, robust automation tool for automatically solving assigned academic quizzes on **Acropolis Moodle LMS** using **Playwright** and **AI (Google Gemini / NVIDIA NIM)**.
 
