@@ -2,10 +2,12 @@
 import os
 import re
 import html
+import jwt
 from typing import Any, Dict, List, Optional, Union
 from urllib.parse import urlparse
 
-from pydantic import BaseModel, validator, ValidationError as PydanticValidationError
+import bleach
+from pydantic import BaseModel, field_validator, ValidationError as PydanticValidationError
 from pydantic.types import constr
 
 from config import get_settings
@@ -35,123 +37,166 @@ class ValidationError(Exception):
         return " | ".join(parts)
 
 
-class QuizConfigModel(BaseModel):
-    """Pydantic model for quiz configuration validation."""
+def sanitize_html_input(html_content: str, max_length: int = 10000) -> str:
+    """
+    Sanitize HTML input using bleach to prevent XSS attacks.
     
-    title: constr(min_length=1, max_length=200, strip_whitespace=True)
-    description: Optional[constr(max_length=2000, strip_whitespace=True)] = None
-    time_limit_minutes: Optional[int] = None
-    max_attempts: int = 1
-    passing_score: float = 70.0
-    shuffle_questions: bool = False
-    shuffle_options: bool = False
-    show_correct_answers: bool = True
-    show_explanations: bool = True
-    allow_review: bool = True
+    Args:
+        html_content: Raw HTML string to sanitize
+        max_length: Maximum allowed length after sanitization
+        
+    Returns:
+        Sanitized HTML string safe for rendering
+    """
+    if not html_content:
+        return ""
     
-    @validator('time_limit_minutes')
-    def validate_time_limit(cls, v):
-        if v is not None and (v < 1 or v > 480):
-            raise ValueError('Time limit must be between 1 and 480 minutes')
-        return v
+    allowed_tags = [
+        'p', 'br', 'strong', 'em', 'u', 's', 'sub', 'sup',
+        'ul', 'ol', 'li', 'blockquote', 'code', 'pre',
+        'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+        'a', 'img', 'table', 'thead', 'tbody', 'tr', 'th', 'td',
+        'div', 'span', 'hr'
+    ]
     
-    @validator('max_attempts')
-    def validate_max_attempts(cls, v):
-        if v < 1 or v > 10:
-            raise ValueError('Max attempts must be between 1 and 10')
-        return v
+    allowed_attributes = {
+        'a': ['href', 'title', 'target', 'rel'],
+        'img': ['src', 'alt', 'title', 'width', 'height'],
+        'code': ['class'],
+        'pre': ['class'],
+        'div': ['class'],
+        'span': ['class'],
+        'th': ['scope'],
+        'td': ['colspan', 'rowspan'],
+    }
     
-    @validator('passing_score')
-    def validate_passing_score(cls, v):
-        if v < 0 or v > 100:
-            raise ValueError('Passing score must be between 0 and 100')
-        return v
+    allowed_protocols = ['http', 'https', 'mailto']
+    
+    sanitized = bleach.clean(
+        html_content,
+        tags=allowed_tags,
+        attributes=allowed_attributes,
+        protocols=allowed_protocols,
+        strip=True,
+        strip_comments=True
+    )
+    
+    sanitized = bleach.linkify(sanitized, parse_email=True)
+    
+    if len(sanitized) > max_length:
+        sanitized = sanitized[:max_length]
+        logger.warning(f"HTML content truncated to {max_length} characters")
+    
+    return sanitized
 
 
-class QuestionDataModel(BaseModel):
-    """Pydantic model for question data validation."""
+def sanitize_plain_text(text: str, max_length: int = 5000) -> str:
+    """
+    Sanitize plain text input by escaping HTML and limiting length.
     
-    question_text: constr(min_length=1, max_length=5000, strip_whitespace=True)
-    question_type: constr(regex=r'^(multiple_choice|true_false|short_answer|essay|matching|fill_blank)$')
-    options: Optional[List[constr(min_length=1, max_length=500, strip_whitespace=True)]] = None
-    correct_answer: Union[str, List[str], Dict[str, str]]
-    explanation: Optional[constr(max_length=2000, strip_whitespace=True)] = None
-    points: float = 1.0
-    difficulty: constr(regex=r'^(easy|medium|hard)$') = 'medium'
-    tags: List[constr(min_length=1, max_length=50, strip_whitespace=True)] = []
+    Args:
+        text: Raw text string to sanitize
+        max_length: Maximum allowed length
+        
+    Returns:
+        Sanitized plain text string
+    """
+    if not text:
+        return ""
     
-    @validator('options')
-    def validate_options_for_type(cls, v, values):
-        q_type = values.get('question_type')
-        if q_type in ('multiple_choice', 'matching') and not v:
-            raise ValueError(f'Options required for {q_type} questions')
-        if q_type == 'multiple_choice' and v and len(v) < 2:
-            raise ValueError('Multiple choice questions need at least 2 options')
-        if q_type == 'multiple_choice' and v and len(v) > 10:
-            raise ValueError('Multiple choice questions cannot have more than 10 options')
-        return v
+    sanitized = html.escape(text.strip())
     
-    @validator('correct_answer')
-    def validate_correct_answer(cls, v, values):
-        q_type = values.get('question_type')
-        options = values.get('options') or []
-        
-        if q_type == 'multiple_choice':
-            if isinstance(v, str):
-                if v not in options:
-                    raise ValueError('Correct answer must be one of the provided options')
-            elif isinstance(v, list):
-                for ans in v:
-                    if ans not in options:
-                        raise ValueError(f'Correct answer "{ans}" not in provided options')
-            else:
-                raise ValueError('Correct answer for multiple choice must be string or list of strings')
-        
-        elif q_type == 'true_false':
-            if v not in ('true', 'false', True, False, 'True', 'False'):
-                raise ValueError('True/False answer must be true or false')
-        
-        elif q_type == 'short_answer':
-            if not isinstance(v, str) or not v.strip():
-                raise ValueError('Short answer must be a non-empty string')
-        
-        elif q_type == 'essay':
-            if not isinstance(v, str):
-                raise ValueError('Essay answer key must be a string')
-        
-        elif q_type == 'matching':
-            if not isinstance(v, dict):
-                raise ValueError('Matching answer must be a dictionary mapping left to right')
-            if options:
-                left_items = [opt for opt in options if opt.startswith('LEFT:')]
-                right_items = [opt for opt in options if opt.startswith('RIGHT:')]
-                for left, right in v.items():
-                    if left not in left_items:
-                        raise ValueError(f'Left item "{left}" not in options')
-                    if right not in right_items:
-                        raise ValueError(f'Right item "{right}" not in options')
-        
-        elif q_type == 'fill_blank':
-            if not isinstance(v, (str, list)):
-                raise ValueError('Fill blank answer must be string or list of acceptable answers')
-        
-        return v
+    sanitized = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '', sanitized)
     
-    @validator('points')
-    def validate_points(cls, v):
-        if v <= 0 or v > 100:
-            raise ValueError('Points must be between 0.1 and 100')
-        return v
+    if len(sanitized) > max_length:
+        sanitized = sanitized[:max_length]
+        logger.warning(f"Plain text truncated to {max_length} characters")
+    
+    return sanitized
 
 
-class LMSCredentialsModel(BaseModel):
-    """Pydantic model for LMS credentials validation."""
+def validate_quiz_id(quiz_id: str) -> bool:
+    """
+    Validate quiz ID format (UUID v4 or alphanumeric with hyphens).
     
-    lms_type: constr(regex=r'^(canvas|moodle|blackboard|d2l|google_classroom)$')
-    base_url: constr(min_length=1, max_length=500, strip_whitespace=True)
-    client_id: Optional[constr(min_length=1, max_length=200, strip_whitespace=True)] = None
-    client_secret: Optional[constr(min_length=1, max_length=500, strip_whitespace=True)] = None
-    access_token: Optional[constr(min_length=1, max_length=1000, strip_whitespace=True)] = None
-    refresh_token: Optional[constr(min_length=1, max_length=1000, strip_whitespace=True)] = None
-    api_key: Optional[constr(min_length=1, max_length=500, strip_whitespace=True)] = None
-    username: Optional[constr(min
+    Args:
+        quiz_id: Quiz identifier string
+        
+    Returns:
+        True if valid format
+        
+    Raises:
+        ValidationError: If format is invalid
+    """
+    if not quiz_id:
+        raise ValidationError("Quiz ID cannot be empty", field="quiz_id", value=quiz_id)
+    
+    uuid_pattern = re.compile(
+        r'^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$',
+        re.IGNORECASE
+    )
+    
+    alphanumeric_pattern = re.compile(r'^[a-zA-Z0-9_-]{1,64}$')
+    
+    if not (uuid_pattern.match(quiz_id) or alphanumeric_pattern.match(quiz_id)):
+        raise ValidationError(
+            "Invalid quiz ID format. Must be UUID v4 or alphanumeric (max 64 chars)",
+            field="quiz_id",
+            value=quiz_id
+        )
+    
+    return True
+
+
+def validate_session_token(token: str, secret_key: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Validate JWT session token format and signature.
+    
+    Args:
+        token: JWT token string
+        secret_key: Secret key for signature verification (optional, uses settings if not provided)
+        
+    Returns:
+        Decoded token payload
+        
+    Raises:
+        ValidationError: If token is invalid, expired, or malformed
+    """
+    if not token:
+        raise ValidationError("Session token cannot be empty", field="session_token", value=token)
+    
+    if not secret_key:
+        settings = get_settings()
+        secret_key = settings.jwt_secret_key
+    
+    try:
+        parts = token.split('.')
+        if len(parts) != 3:
+            raise ValidationError("Invalid JWT format: must have 3 parts", field="session_token", value=token)
+        
+        payload = jwt.decode(
+            token,
+            secret_key,
+            algorithms=["HS256"],
+            options={"verify_exp": True, "verify_iat": True}
+        )
+        
+        required_claims = ['sub', 'iat', 'exp', 'type']
+        for claim in required_claims:
+            if claim not in payload:
+                raise ValidationError(f"Missing required claim: {claim}", field="session_token", value=token)
+        
+        if payload.get('type') not in ('access', 'refresh'):
+            raise ValidationError("Invalid token type", field="session_token", value=token)
+        
+        return payload
+        
+    except jwt.ExpiredSignatureError:
+        raise ValidationError("Session token has expired", field="session_token", value=token)
+    except jwt.InvalidTokenError as e:
+        raise ValidationError(f"Invalid session token: {str(e)}", field="session_token", value=token)
+
+
+def validate_url(url: str, allowed_schemes: Optional[List[str]] = None) -> bool:
+    """
+    Validate URL format and scheme.
