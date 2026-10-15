@@ -5,11 +5,11 @@
 
 ## Milestone 1: Architecture & Foundation
 - [x] Scaffold initial project structure and repository configuration
-- [ ] Implement core domain data models and type contracts
-- [ ] Configure environment guardrails and validation utilities
+- [x] Implement core domain data models and type contracts
+- [x] Configure environment guardrails and validation utilities
 
 ## Milestone 2: Service Layer & Business Logic
-- [ ] Implement domain service handlers and business logic
+- [x] Implement domain service handlers and business logic
 - [ ] Add input sanitization and secure parameter validation
 - [ ] Configure structured telemetry and error event handling
 
@@ -30,3 +30,4 @@
 
 ## Checkpoint History
 - **2026-10-15**: Initialized roadmap progress tracker with active project milestones.
+- **2026-10-15**: Core domain models and QuizService implemented with unit test coverage. Service layer foundation complete.
