@@ -10,8 +10,8 @@
 
 ## Milestone 2: Service Layer & Business Logic
 - [x] Implement domain service handlers and business logic
-- [ ] Add input sanitization and secure parameter validation
-- [ ] Configure structured telemetry and error event handling
+- [x] Add input sanitization and secure parameter validation
+- [x] Configure structured telemetry and error event handling
 
 ## Milestone 3: Endpoints & Application Integration
 - [ ] Implement service API endpoints with schema validation
@@ -31,3 +31,4 @@
 ## Checkpoint History
 - **2026-10-15**: Initialized roadmap progress tracker with active project milestones.
 - **2026-10-15**: Core domain models and QuizService implemented with unit test coverage. Service layer foundation complete.
+- **2026-10-15**: Milestone 2 complete — input sanitization and secure parameter validation implemented; structured telemetry and error event handling configured. Milestone 3 in progress — service API endpoints with schema validation implementation underway.
