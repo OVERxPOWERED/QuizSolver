@@ -14,12 +14,12 @@
 - [x] Configure structured telemetry and error event handling
 
 ## Milestone 3: Endpoints & Application Integration
-- [ ] Implement service API endpoints with schema validation
-- [ ] Add query caching layer and data access optimization
-- [ ] Configure system health checks and status diagnostics
+- [x] Implement service API endpoints with schema validation
+- [x] Add query caching layer and data access optimization
+- [x] Configure system health checks and status diagnostics
 
 ## Milestone 4: Verification & Automated Testing
-- [ ] Implement automated unit test suites for core logic
+- [x] Implement automated unit test suites for core logic
 - [ ] Add integration assertions and boundary edge cases
 - [ ] Verify test suite green status and assertion benchmarks
 
@@ -32,3 +32,4 @@
 - **2026-10-15**: Initialized roadmap progress tracker with active project milestones.
 - **2026-10-15**: Core domain models and QuizService implemented with unit test coverage. Service layer foundation complete.
 - **2026-10-15**: Milestone 2 complete — input sanitization and secure parameter validation implemented; structured telemetry and error event handling configured. Milestone 3 in progress — service API endpoints with schema validation implementation underway.
+- **2026-10-15**: Milestone 3 complete — all API endpoints implemented with schema validation, query caching layer and data access optimization added, system health checks and status diagnostics configured. Milestone 4 in progress — automated unit test suites for core logic implemented with quiz API endpoint test coverage.
