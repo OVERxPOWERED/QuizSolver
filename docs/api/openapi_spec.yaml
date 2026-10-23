@@ -1,0 +1,238 @@
+```yaml
+openapi: 3.1.0
+info:
+  title: Quiz Generator API
+  description: |
+    A comprehensive API for generating educational quizzes from text content using AI.
+    
+    ## Features
+    - Generate quizzes from text with configurable question types and difficulty
+    - Async job processing with status tracking
+    - Redis-backed caching for performance
+    - Prometheus metrics exposition
+    - Health checks for Kubernetes readiness/liveness probes
+    
+    ## Authentication
+    API Key authentication via `X-API-Key` header or Bearer token.
+    
+    ## Rate Limiting
+    - 100 requests/minute for quiz generation
+    - 1000 requests/minute for cache/metrics endpoints
+    - 429 response with `Retry-After` header when exceeded
+    
+    ## Versioning
+    API version is specified in the URL path (`/api/v1/`).
+  version: 1.0.0
+  contact:
+    name: Platform Engineering
+    email: platform@example.com
+    url: https://github.com/example/quiz-generator
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+servers:
+  - url: http://localhost:8000/api/v1
+    description: Development server
+  - url: https://staging-api.example.com/api/v1
+    description: Staging server
+  - url: https://api.example.com/api/v1
+    description: Production server
+tags:
+  - name: Health
+    description: Health check and readiness endpoints
+  - name: Quiz Generation
+    description: Quiz creation, retrieval, and management
+  - name: Cache Management
+    description: Cache statistics and invalidation
+  - name: Metrics
+    description: Prometheus metrics exposition
+paths:
+  /health:
+    get:
+      tags:
+        - Health
+      summary: Liveness probe
+      description: |
+        Basic liveness check. Returns 200 if the service is running.
+        Used by Kubernetes liveness probe.
+      operationId: healthCheck
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthCheck'
+              example:
+                status: healthy
+                timestamp: "2024-01-15T10:30:00Z"
+                version: "1.0.0"
+                uptime_seconds: 3600.5
+        '503':
+          description: Service unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error:
+                  code: SERVICE_UNAVAILABLE
+                  message: Service is starting up
+                  details: {}
+  /health/ready:
+    get:
+      tags:
+        - Health
+      summary: Readiness probe
+      description: |
+        Comprehensive readiness check including database, cache, and external service connectivity.
+        Used by Kubernetes readiness probe.
+      operationId: readinessCheck
+      responses:
+        '200':
+          description: Service is ready to accept traffic
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthCheck'
+              example:
+                status: ready
+                timestamp: "2024-01-15T10:30:00Z"
+                version: "1.0.0"
+                uptime_seconds: 3600.5
+                checks:
+                  database: healthy
+                  cache: healthy
+                  llm_service: healthy
+        '503':
+          description: Service not ready
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error:
+                  code: NOT_READY
+                  message: Cache connection failed
+                  details:
+                    cache: "connection refused"
+  /quiz/generate:
+    post:
+      tags:
+        - Quiz Generation
+      summary: Generate a quiz from text content
+      description: |
+        Create a new quiz generation job from the provided text content.
+        
+        The request is processed asynchronously. Use the returned `job_id` to poll
+        `/quiz/jobs/{job_id}` for status and results.
+        
+        ## Question Types
+        - `multiple_choice`: Single correct answer from 4 options
+        - `true_false`: True/False questions
+        - `short_answer`: Open-ended questions requiring brief answers
+        - `fill_blank`: Fill-in-the-blank questions
+        
+        ## Difficulty Levels
+        - `easy`: Basic recall and comprehension
+        - `medium`: Application and analysis
+        - `hard`: Synthesis and evaluation
+      operationId: generateQuiz
+      security:
+        - ApiKeyAuth: []
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/QuizRequest'
+            examples:
+              basic:
+                summary: Basic quiz generation
+                value:
+                  text: "Photosynthesis is the process by which green plants convert light energy into chemical energy. During photosynthesis, plants absorb light using chlorophyll in their leaves and use it to transform carbon dioxide and water into glucose and oxygen."
+                  num_questions: 5
+                  question_types:
+                    - multiple_choice
+                    - true_false
+                  difficulty: medium
+                  language: en
+              comprehensive:
+                summary: Comprehensive quiz with all question types
+                value:
+                  text: "The Industrial Revolution was a period of major industrialization that began in Great Britain in the late 1700s and spread to other parts of the world. It marked a shift from agrarian economies to industrial ones, with new manufacturing processes, machines, and factories."
+                  num_questions: 10
+                  question_types:
+                    - multiple_choice
+                    - true_false
+                    - short_answer
+                    - fill_blank
+                  difficulty: hard
+                  language: en
+                  metadata:
+                    source: "history_textbook_chapter_3"
+                    topic: "Industrial Revolution"
+      responses:
+        '202':
+          description: Quiz generation job accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QuizJobResponse'
+              example:
+                job_id: "550e8400-e29b-41d4-a716-446655440000"
+                status: pending
+                created_at: "2024-01-15T10:30:00Z"
+                estimated_completion_seconds: 30
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                validation_error:
+                  summary: Validation error
+                  value:
+                    error:
+                      code: VALIDATION_ERROR
+                      message: Request validation failed
+                      details:
+                        field_errors:
+                          - field: num_questions
+                            message: "must be between 1 and 50"
+                          - field: text
+                            message: "must be at least 100 characters"
+                empty_text:
+                  summary: Empty text
+                  value:
+                    error:
+                      code: VALIDATION_ERROR
+                      message: Text content cannot be empty
+                      details: {}
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error:
+                  code: UNAUTHORIZED
+                  message: Invalid or missing API key
+                  details: {}
+        '413':
+          description: Payload too large
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error:
+                  code: PAYLOAD_TOO_LARGE
+                  message: Text content exceeds maximum length of 50000 characters
+                  details:
+                    max_length: 50000
+                    actual_length: 55000
+        '42
