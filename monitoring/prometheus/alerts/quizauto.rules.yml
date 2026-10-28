@@ -1,0 +1,56 @@
+groups:
+  - name: quizauto.rules
+    rules:
+      - alert: HighErrorRate
+        expr: rate(http_requests_total{status=~"5.."}[5m]) > 0.05
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "High HTTP 5xx error rate detected"
+          description: "HTTP 5xx error rate is {{ $value | humanizePercentage }} (threshold: 5%) for the last 2 minutes. Service: {{ $labels.service }}, Instance: {{ $labels.instance }}"
+
+      - alert: HighLatency
+        expr: histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m])) > 2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High HTTP request latency detected"
+          description: "95th percentile HTTP request latency is {{ $value | humanizeDuration }} (threshold: 2s) for the last 5 minutes. Service: {{ $labels.service }}, Instance: {{ $labels.instance }}"
+
+      - alert: AISolverHighLatency
+        expr: histogram_quantile(0.95, rate(ai_solver_duration_seconds_bucket[5m])) > 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "AI Solver high latency detected"
+          description: "95th percentile AI solver duration is {{ $value | humanizeDuration }} (threshold: 10s) for the last 5 minutes. Service: {{ $labels.service }}, Instance: {{ $labels.instance }}"
+
+      - alert: BrowserAutomationFailureRate
+        expr: rate(browser_automation_total{status="failed"}[5m]) / rate(browser_automation_total[5m]) > 0.1
+        for: 3m
+        labels:
+          severity: critical
+        annotations:
+          summary: "High browser automation failure rate detected"
+          description: "Browser automation failure rate is {{ $value | humanizePercentage }} (threshold: 10%) for the last 3 minutes. Service: {{ $labels.service }}, Instance: {{ $labels.instance }}"
+
+      - alert: CacheLowHitRatio
+        expr: rate(cache_hits_total[5m]) / (rate(cache_hits_total[5m]) + rate(cache_misses_total[5m])) < 0.5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Low cache hit ratio detected"
+          description: "Cache hit ratio is {{ $value | humanizePercentage }} (threshold: 50%) for the last 10 minutes. Service: {{ $labels.service }}, Instance: {{ $labels.instance }}"
+
+      - alert: HighMemoryUsage
+        expr: process_resident_memory_bytes > 1e9
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High memory usage detected"
+          description: "Process resident memory is {{ $value | humanize1024 }} (threshold: 1GB) for the last 5 minutes. Service: {{ $labels.service }}, Instance: {{ $labels.instance }}"
