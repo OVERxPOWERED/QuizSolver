@@ -27,14 +27,20 @@ async def healthz() -> dict:
     return {"status": "ok"}
 
 
-@api_router.post("/quiz/run", response_model=QuizRunResponse, status_code=status.HTTP_201_CREATED)
+@api_router.post(
+    "/quiz/run",
+    response_model=QuizRunResponse,
+    status_code=status.HTTP_201_CREATED,
+)
 async def run_quiz_endpoint(request: QuizRunRequest) -> QuizRunResponse:
     """Execute a quiz run with AI solver and record metrics."""
     quiz_runs_total.inc()
-    
+
     with ai_solver_latency_seconds.time():
-        quiz_run = await run_quiz(request.questions, request.category, request.difficulty)
-    
+        quiz_run = await run_quiz(
+            request.questions, request.category, request.difficulty
+        )
+
     return QuizRunResponse(
         quiz_id=quiz_run.quiz_id,
         status=quiz_run.status,
@@ -48,8 +54,10 @@ async def get_quiz_result_endpoint(quiz_id: str) -> QuizResultResponse:
     """Retrieve quiz result by ID."""
     quiz_result = await get_quiz_result(quiz_id)
     if not quiz_result:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Quiz not found")
-    
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Quiz not found"
+        )
+
     return QuizResultResponse(
         quiz_id=quiz_result.quiz_id,
         questions=quiz_result.questions,
