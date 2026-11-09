@@ -1,11 +1,13 @@
 from enum import Enum
-from typing import Optional, List, Dict, Any
-from dataclasses import dataclass
+from typing import Optional, List, Dict, Any, Callable, Awaitable
+from dataclasses import dataclass, field
+from datetime import datetime
 
-from fastapi import FastAPI, Request, Response, APIRouter
+from fastapi import FastAPI, Request, Response, APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.datastructures import Headers
+from starlette.datastructures import Headers, MutableHeaders
+from starlette.types import ASGIApp, Receive, Scope, Send
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings
 
@@ -40,12 +42,26 @@ class APIVersion(str, Enum):
             return "2026-06-30"
         return None
 
+    def release_date(self) -> str:
+        if self == APIVersion.V1:
+            return "2024-01-15"
+        return "2025-01-15"
 
-class VersionConfig(BaseSettings):
+
+@dataclass
+class VersionConfig:
+    """Metadata for a specific API version."""
+    version: APIVersion
+    release_date: str
+    sunset_date: Optional[str]
+    is_deprecated: bool
+
+
+class VersioningSettings(BaseSettings):
     """Configuration for API versioning."""
     default_version: APIVersion = APIVersion.V2
-    supported_versions: List[APIVersion] = [APIVersion.V1, APIVersion.V2]
-    deprecated_versions: List[APIVersion] = [APIVersion.V1]
+    supported_versions: List[APIVersion] = field(default_factory=lambda: [APIVersion.V1, APIVersion.V2])
+    deprecated_versions: List[APIVersion] = field(default_factory=lambda: [APIVersion.V1])
     version_header_name: str = "API-Version"
     deprecation_header_name: str = "Deprecation"
     sunset_header_name: str = "Sunset"
@@ -77,8 +93,8 @@ class VersionNegotiator:
     3. Default version from config
     """
 
-    def __init__(self, config: Optional[VersionConfig] = None):
-        self.config = config or VersionConfig()
+    def __init__(self, config: Optional[VersioningSettings] = None):
+        self.config = config or VersioningSettings()
         self._version_patterns = {
             version: version.media_type for version in self.config.supported_versions
         }
@@ -120,162 +136,152 @@ class VersionNegotiator:
             if path.startswith(version.url_prefix):
                 # Ensure it's a prefix match (not partial like /api/v10)
                 remainder = path[len(version.url_prefix):]
-                if not remainder or remainder.startswith("/"):
+                if remainder == "" or remainder.startswith("/"):
                     return version
         return None
 
-    def negotiate(self, request: Request) -> VersionInfo:
+    def negotiate_version(
+        self, 
+        accept_header: Optional[str], 
+        url_path: str,
+        x_api_version_header: Optional[str] = None
+    ) -> VersionInfo:
         """
-        Negotiate version from request.
+        Negotiate version using priority order.
         
-        Returns VersionInfo with negotiated version and metadata.
+        Args:
+            accept_header: Value of Accept header
+            url_path: Request URL path
+            x_api_version_header: Value of X-API-Version header (fallback)
+            
+        Returns:
+            VersionInfo with negotiated version and metadata
         """
         # 1. Try Accept header
-        accept = request.headers.get("accept", "")
-        version = self.parse_accept_header(accept)
-        if version:
-            return self._build_version_info(version, "header")
-
-        # 2. Try URL path
-        version = self.parse_url_path(request.url.path)
-        if version:
-            return self._build_version_info(version, "url")
-
-        # 3. Default
-        return self._build_version_info(self.config.default_version, "default")
-
-    def _build_version_info(self, version: APIVersion, source: str) -> VersionInfo:
+        version = self.parse_accept_header(accept_header) if accept_header else None
+        source = "header"
+        
+        # 2. Try X-API-Version header (explicit version override)
+        if version is None and x_api_version_header:
+            try:
+                version = APIVersion(x_api_version_header.strip())
+                source = "x-api-version-header"
+            except ValueError:
+                pass
+        
+        # 3. Try URL path
+        if version is None:
+            version = self.parse_url_path(url_path)
+            source = "url"
+        
+        # 4. Fallback to default
+        if version is None:
+            version = self.config.default_version
+            source = "default"
+        
+        # Validate version is supported
+        if version not in self.config.supported_versions:
+            version = self.config.default_version
+            source = "default (unsupported requested)"
+        
         return VersionInfo(
             version=version,
             source=source,
-            is_deprecated=version in self.config.deprecated_versions,
+            is_deprecated=version.is_deprecated(),
             deprecation_date=version.deprecation_date(),
-            sunset_date=version.sunset_date(),
+            sunset_date=version.sunset_date()
         )
 
-    def to_headers(self, version_info: VersionInfo) -> Dict[str, str]:
-        """Convert version info to response headers."""
-        headers = {
-            self.config.version_header_name: version_info.version.value,
-        }
-        
-        if version_info.is_deprecated:
-            headers[self.config.deprecation_header_name] = "true"
-            if version_info.deprecation_date:
-                headers[self.config.deprecation_header_name] += f"; deprecation-date={version_info.deprecation_date}"
-            if version_info.sunset_date:
-                headers[self.config.sunset_header_name] = version_info.sunset_date
-        
-        return headers
+
+# Response transformer registry
+ResponseTransformer = Callable[[Dict[str, Any], APIVersion], Awaitable[Dict[str, Any]]]
+_transformers: Dict[APIVersion, ResponseTransformer] = {}
+
+
+def register_response_transformer(version: APIVersion, transformer: ResponseTransformer) -> None:
+    """Register a response transformer for a specific API version."""
+    _transformers[version] = transformer
+
+
+async def transform_response(response_data: Dict[str, Any], target_version: APIVersion) -> Dict[str, Any]:
+    """Apply version-specific response transformation."""
+    if target_version in _transformers:
+        return await _transformers[target_version](response_data, target_version)
+    return response_data
+
+
+# Default transformers for backward compatibility
+async def _v1_transformer(data: Dict[str, Any], version: APIVersion) -> Dict[str, Any]:
+    """Transform v2 response format to v1 format."""
+    # Example: v2 uses 'quiz_id', v1 used 'id'
+    if isinstance(data, dict):
+        transformed = data.copy()
+        if "quiz_id" in transformed:
+            transformed["id"] = transformed.pop("quiz_id")
+        if "created_at" in transformed and "createdAt" not in transformed:
+            transformed["createdAt"] = transformed.pop("created_at")
+        return transformed
+    return data
+
+
+async def _v2_transformer(data: Dict[str, Any], version: APIVersion) -> Dict[str, Any]:
+    """v2 is current format, no transformation needed."""
+    return data
+
+
+# Register default transformers
+register_response_transformer(APIVersion.V1, _v1_transformer)
+register_response_transformer(APIVersion.V2, _v2_transformer)
 
 
 class VersioningMiddleware(BaseHTTPMiddleware):
     """
-    FastAPI middleware that adds version headers to all responses.
+    ASGI middleware for API version negotiation and response header injection.
     
-    Adds:
-    - API-Version: The negotiated version
-    - Deprecation: true (if deprecated) with optional date
-    - Sunset: Sunset date (if deprecated)
+    Handles:
+    - Version negotiation via Accept header, X-API-Version header, or URL path
+    - Injection of API-Version, Deprecation, and Sunset response headers
+    - Backward-compatible response transformation
     """
 
-    def __init__(self, app: FastAPI, negotiator: Optional[VersionNegotiator] = None):
+    def __init__(
+        self, 
+        app: ASGIApp, 
+        config: Optional[VersioningSettings] = None,
+        negotiator: Optional[VersionNegotiator] = None
+    ):
         super().__init__(app)
-        self.negotiator = negotiator or VersionNegotiator()
+        self.config = config or VersioningSettings()
+        self.negotiator = negotiator or VersionNegotiator(self.config)
 
-    async def dispatch(self, request: Request, call_next):
-        # Negotiate version for this request
-        version_info = self.negotiator.negotiate(request)
+    async def dispatch(self, request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
+        # Negotiate version
+        accept_header = request.headers.get("accept")
+        x_api_version = request.headers.get("x-api-version")
+        version_info = self.negotiator.negotiate_version(
+            accept_header=accept_header,
+            url_path=request.url.path,
+            x_api_version_header=x_api_version
+        )
         
-        # Store version info in request state for route handlers
+        # Store version info in request state for route access
         request.state.api_version = version_info
         
         # Process request
         response = await call_next(request)
         
-        # Add version headers to response
-        headers = self.negotiator.to_headers(version_info)
-        for key, value in headers.items():
-            response.headers[key] = value
+        # Inject version headers
+        self._inject_version_headers(response, version_info)
         
-        # Add Vary header for proper caching
-        response.headers["Vary"] = "Accept"
+        # Transform response body for backward compatibility (only for JSON responses)
+        if version_info.version != self.config.default_version:
+            response = await self._transform_response_body(response, version_info.version)
         
         return response
 
-
-def include_versioned_routes(
-    app: FastAPI,
-    routers: Dict[APIVersion, APIRouter],
-    prefix: str = "",
-    tags: Optional[List[str]] = None,
-    **kwargs: Any
-) -> None:
-    """
-    Include versioned routers with proper prefixes.
-    
-    Args:
-        app: FastAPI application
-        routers: Dict mapping APIVersion to APIRouter
-        prefix: Additional prefix to prepend (e.g., "/api")
-        tags: OpenAPI tags for all routes
-        **kwargs: Additional arguments passed to include_router
-    """
-    config = VersionConfig()
-    
-    for version, router in routers.items():
-        if version not in config.supported_versions:
-            continue
-            
-        version_prefix = f"{prefix}{version.url_prefix}"
+    def _inject_version_headers(self, response: Response, version_info: VersionInfo) -> None:
+        """Inject version-related headers into response."""
+        headers = MutableHeaders(scope=response)
+        headers[self.config.version_header_name] = version_info.version.value
         
-        # Add deprecation info to router tags if deprecated
-        router_tags = list(tags) if tags else []
-        if version in config.deprecated_versions:
-            router_tags.append("deprecated")
-        
-        app.include_router(
-            router,
-            prefix=version_prefix,
-            tags=router_tags,
-            **kwargs
-        )
-
-
-# Default instances for easy importing
-version_config = VersionConfig()
-version_negotiator = VersionNegotiator(version_config)
-
-
-def create_versioning_middleware(app: FastAPI) -> VersioningMiddleware:
-    """Factory function to create versioning middleware with default negotiator."""
-    return VersioningMiddleware(app, version_negotiator)
-
-
-# Convenience function for getting version from request state
-def get_api_version(request: Request) -> VersionInfo:
-    """Get negotiated API version from request state."""
-    return getattr(request.state, "api_version", version_negotiator._build_version_info(
-        version_config.default_version, "default"
-    ))
-
-
-# Dependency for FastAPI route handlers
-async def api_version_dependency(request: Request) -> VersionInfo:
-    """FastAPI dependency to inject version info into route handlers."""
-    return get_api_version(request)
-
-
-__all__ = [
-    "APIVersion",
-    "VersionConfig",
-    "VersionInfo",
-    "VersionNegotiator",
-    "VersioningMiddleware",
-    "include_versioned_routes",
-    "version_config",
-    "version_negotiator",
-    "create_versioning_middleware",
-    "get_api_version",
-    "api_version_dependency",
-]
+        if version_info.is_deprecated
