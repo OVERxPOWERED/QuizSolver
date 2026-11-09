@@ -1,0 +1,292 @@
+apiVersion: litmuschaos.io/v1alpha1
+kind: ChaosEngine
+metadata:
+  name: quizauto-resilience-engine
+  namespace: quizauto
+  annotations:
+    litmuschaos.io/experiment-schedule: "0 */6 * * *"
+    litmuschaos.io/steady-state-hypothesis: "quiz_runs_total success rate > 95%"
+    litmuschaos.io/description: "Resilience validation for quizAuto: pod failures, network partitions, dependency outages"
+spec:
+  appinfo:
+    appns: "quizauto"
+    applabel: "app=quiz-api"
+  chaosServiceAccount: litmus-admin
+  monitoring: true
+  jobCleanUpPolicy: "delete"
+  experiments:
+    - name: pod-delete-quiz-api
+      spec:
+        components:
+          env:
+            - name: TARGET_CONTAINER
+              value: "quiz-api"
+            - name: PODS_AFFECTED_PERC
+              value: "50"
+            - name: CHAOS_INTERVAL
+              value: "10"
+            - name: CHAOS_DURATION
+              value: "60"
+            - name: FORCE
+              value: "false"
+    - name: network-latency-redis-postgres
+      spec:
+        components:
+          env:
+            - name: TARGET_CONTAINER
+              value: "quiz-api"
+            - name: LATENCY
+              value: "200"
+            - name: JITTER
+              value: "50"
+            - name: DESTINATION_IPS
+              value: "redis.quizauto.svc.cluster.local,postgres.quizauto.svc.cluster.local"
+            - name: DESTINATION_PORT
+              value: "6379,5432"
+            - name: NETWORK_INTERFACE
+              value: "eth0"
+            - name: CHAOS_DURATION
+              value: "120"
+            - name: CHAOS_INTERVAL
+              value: "10"
+    - name: cpu-hog-quiz-worker
+      spec:
+        components:
+          env:
+            - name: TARGET_CONTAINER
+              value: "quiz-worker"
+            - name: CPU_CORES
+              value: "1"
+            - name: CPU_PERCENT
+              value: "80"
+            - name: CHAOS_DURATION
+              value: "180"
+            - name: CHAOS_INTERVAL
+              value: "15"
+    - name: pod-network-partition-lms
+      spec:
+        components:
+          env:
+            - name: TARGET_CONTAINER
+              value: "quiz-api"
+            - name: DESTINATION_HOST
+              value: "lms-api.external.com"
+            - name: DESTINATION_PORT
+              value: "443"
+            - name: NETWORK_INTERFACE
+              value: "eth0"
+            - name: CHAOS_DURATION
+              value: "90"
+            - name: CHAOS_INTERVAL
+              value: "10"
+---
+apiVersion: litmuschaos.io/v1alpha1
+kind: ChaosExperiment
+metadata:
+  name: pod-delete-quiz-api
+  namespace: quizauto
+  labels:
+    name: pod-delete-quiz-api
+    app: quiz-auto
+    experiment-type: pod-failure
+spec:
+  definition:
+    scope: Namespaced
+    permissions:
+      - apiGroups: [""]
+        resources: ["pods", "pods/log", "events"]
+        verbs: ["create", "delete", "get", "list", "watch", "update", "patch"]
+      - apiGroups: ["apps"]
+        resources: ["deployments", "replicasets", "statefulsets"]
+        verbs: ["get", "list", "watch"]
+    image: "litmuschaos/go-runner:3.0.0"
+    imagePullPolicy: Always
+    args:
+      - "-c"
+      - "./pod-delete"
+    env:
+      - name: TOTAL_CHAOS_DURATION
+        value: "60"
+      - name: CHAOS_INTERVAL
+        value: "10"
+      - name: PODS_AFFECTED_PERC
+        value: "50"
+      - name: TARGET_CONTAINER
+        value: "quiz-api"
+      - name: FORCE
+        value: "false"
+      - name: LIB_IMAGE
+        value: "litmuschaos/go-runner:3.0.0"
+      - name: RAMP_TIME
+        value: "0"
+    labels:
+      name: pod-delete-quiz-api
+      app: quiz-auto
+---
+apiVersion: litmuschaos.io/v1alpha1
+kind: ChaosExperiment
+metadata:
+  name: network-latency-redis-postgres
+  namespace: quizauto
+  labels:
+    name: network-latency-redis-postgres
+    app: quiz-auto
+    experiment-type: network-latency
+spec:
+  definition:
+    scope: Namespaced
+    permissions:
+      - apiGroups: [""]
+        resources: ["pods", "pods/log", "events"]
+        verbs: ["create", "delete", "get", "list", "watch", "update", "patch"]
+      - apiGroups: ["apps"]
+        resources: ["deployments", "replicasets", "statefulsets"]
+        verbs: ["get", "list", "watch"]
+    image: "litmuschaos/go-runner:3.0.0"
+    imagePullPolicy: Always
+    args:
+      - "-c"
+      - "./network-latency"
+    env:
+      - name: TOTAL_CHAOS_DURATION
+        value: "120"
+      - name: CHAOS_INTERVAL
+        value: "10"
+      - name: LATENCY
+        value: "200"
+      - name: JITTER
+        value: "50"
+      - name: DESTINATION_IPS
+        value: "redis.quizauto.svc.cluster.local,postgres.quizauto.svc.cluster.local"
+      - name: DESTINATION_PORT
+        value: "6379,5432"
+      - name: NETWORK_INTERFACE
+        value: "eth0"
+      - name: TARGET_CONTAINER
+        value: "quiz-api"
+      - name: LIB_IMAGE
+        value: "litmuschaos/go-runner:3.0.0"
+      - name: RAMP_TIME
+        value: "0"
+    labels:
+      name: network-latency-redis-postgres
+      app: quiz-auto
+---
+apiVersion: litmuschaos.io/v1alpha1
+kind: ChaosExperiment
+metadata:
+  name: cpu-hog-quiz-worker
+  namespace: quizauto
+  labels:
+    name: cpu-hog-quiz-worker
+    app: quiz-auto
+    experiment-type: cpu-hog
+spec:
+  definition:
+    scope: Namespaced
+    permissions:
+      - apiGroups: [""]
+        resources: ["pods", "pods/log", "events"]
+        verbs: ["create", "delete", "get", "list", "watch", "update", "patch"]
+      - apiGroups: ["apps"]
+        resources: ["deployments", "replicasets", "statefulsets"]
+        verbs: ["get", "list", "watch"]
+    image: "litmuschaos/go-runner:3.0.0"
+    imagePullPolicy: Always
+    args:
+      - "-c"
+      - "./cpu-hog"
+    env:
+      - name: TOTAL_CHAOS_DURATION
+        value: "180"
+      - name: CHAOS_INTERVAL
+        value: "15"
+      - name: CPU_CORES
+        value: "1"
+      - name: CPU_PERCENT
+        value: "80"
+      - name: TARGET_CONTAINER
+        value: "quiz-worker"
+      - name: LIB_IMAGE
+        value: "litmuschaos/go-runner:3.0.0"
+      - name: RAMP_TIME
+        value: "0"
+    labels:
+      name: cpu-hog-quiz-worker
+      app: quiz-auto
+---
+apiVersion: litmuschaos.io/v1alpha1
+kind: ChaosExperiment
+metadata:
+  name: pod-network-partition-lms
+  namespace: quizauto
+  labels:
+    name: pod-network-partition-lms
+    app: quiz-auto
+    experiment-type: network-partition
+spec:
+  definition:
+    scope: Namespaced
+    permissions:
+      - apiGroups: [""]
+        resources: ["pods", "pods/log", "events"]
+        verbs: ["create", "delete", "get", "list", "watch", "update", "patch"]
+      - apiGroups: ["apps"]
+        resources: ["deployments", "replicasets", "statefulsets"]
+        verbs: ["get", "list", "watch"]
+    image: "litmuschaos/go-runner:3.0.0"
+    imagePullPolicy: Always
+    args:
+      - "-c"
+      - "./pod-network-partition"
+    env:
+      - name: TOTAL_CHAOS_DURATION
+        value: "90"
+      - name: CHAOS_INTERVAL
+        value: "10"
+      - name: DESTINATION_HOST
+        value: "lms-api.external.com"
+      - name: DESTINATION_PORT
+        value: "443"
+      - name: NETWORK_INTERFACE
+        value: "eth0"
+      - name: TARGET_CONTAINER
+        value: "quiz-api"
+      - name: LIB_IMAGE
+        value: "litmuschaos/go-runner:3.0.0"
+      - name: RAMP_TIME
+        value: "0"
+    labels:
+      name: pod-network-partition-lms
+      app: quiz-auto
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: litmus-admin
+  namespace: quizauto
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: litmus-admin-role
+rules:
+  - apiGroups: ["", "litmuschaos.io", "batch", "apps"]
+    resources: ["pods", "jobs", "deployments", "statefulsets", "daemonsets", "replicasets", "pods/log", "events", "chaosengines", "chaosexperiments", "chaosresults"]
+    verbs: ["create", "delete", "get", "list", "watch", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: litmus-admin-binding
+subjects:
+  - kind: ServiceAccount
+    name: litmus-admin
+    namespace: quizauto
+roleRef:
+  kind: ClusterRole
+  name: litmus-admin-role
+  apiGroup: rbac.authorization.k8s.io
